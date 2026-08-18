@@ -1,0 +1,6 @@
+# nix / direnv
+/.direnv/
+# mc-rtc-superbuild working tree: generated mc_rtc.yaml plus the local install prefix that
+# shadows the nix-built packages in the devel shell
+/.superbuild/
+/build/
