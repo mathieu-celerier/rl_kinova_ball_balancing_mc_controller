@@ -12,6 +12,8 @@ RLKinovaBallBalancingMcController::RLKinovaBallBalancingMcController(mc_rbdyn::R
 {
   config_ = config;
   currentPolicyIndex = size_t(config_("default_policy_index", 0));
+  // In-place overload: leaves the member at its default when the key is absent.
+  config_("control_frame", controlFrameName);
   // Initialize Constraints
   selfCollisionConstraint->setCollisionsDampers(solver(), {1.2, 70.0});
   solver().removeConstraintSet(dynamicsConstraint);
@@ -23,6 +25,14 @@ RLKinovaBallBalancingMcController::RLKinovaBallBalancingMcController(mc_rbdyn::R
 
   initializeRobot();
   initializeRLPolicy();
+  configureBallSpawn();
+  if(config_.has("sim_ft_sensor"))
+  {
+    auto c = config_("sim_ft_sensor");
+    c("enabled", simFtCompensationEnabled_);
+    c("force_gain", simFtForceGain_);
+    c("remove_calibration_offset", simFtRemoveCalibOffset_);
+  }
 
   addGui();
   addLog();
@@ -46,6 +56,18 @@ bool RLKinovaBallBalancingMcController::run()
 void RLKinovaBallBalancingMcController::reset(const mc_control::ControllerResetData & reset_data)
 {
   mc_control::fsm::Controller::reset(reset_data);
+
+  // By now the interface has registered its datastore calls, so a still-negative answer is the real
+  // one and worth stating: the compensation silently not firing is indistinguishable from it not
+  // being needed, and on hardware it must not fire.
+  if(!simFtCompensationLogged_)
+  {
+    simFtCompensationLogged_ = true;
+    if(simFtCompensationEnabled_ && !simulationFtCompensationActive())
+    {
+      mc_rtc::log::info("[RLKinovaBallBalancingMcController] Real F/T sensor: using its reading as measured");
+    }
+  }
 }
 
 void RLKinovaBallBalancingMcController::initializeRobot()
@@ -180,13 +202,36 @@ void RLKinovaBallBalancingMcController::initializeRLObservation()
   Eigen::Quaterniond quat = Eigen::Quaterniond(eePosW.rotation().transpose()).normalized();
   eeCurrentOrientation << quat.w(), quat.x(), quat.y(), quat.z();
 
-  // sva::ForceVecd wrench = real_robot.forceSensor("EEForceSensor").wrenchWithoutGravity(real_robot);
-  sva::ForceVecd wrench = real_robot.forceSensor("EEForceSensor").wrench();
+  // Gravity-compensated, in the sensor frame, force first: exactly what the policy's ee_ft_wrench
+  // term reproduces in simulation (mode "mc_rtc_calibrated" -- see ball_balancing_mdp.py's
+  // ee_ft_mc_rtc_calibrated_wrench, whose docstring names this call). It returns that quantity
+  // un-negated, so nothing is flipped here; the negation this used to carry belonged to the raw
+  // wrench() reading it was written against.
+  const auto & eeForceSensor = real_robot.forceSensor("EEForceSensor");
+  sva::ForceVecd wrench = eeForceSensor.wrenchWithoutGravity(real_robot);
+  wrench = applySimulationFtResponse(eeForceSensor, wrench);
+
+  // Negated, because mc_rtc and the training pipeline use opposite sign conventions for this
+  // sensor. Measured at a static pose with an empty plate (2026-08-18 log): MuJoCo's own force
+  // sensor -- the quantity ball_balancing_mdp.py's ee_ft_wrench term consumes -- reads
+  // [ 0.1212  2.9803 -0.4245] N there, while mc_rtc reports [-0.1054 -2.9816  0.4170] N. Same
+  // magnitudes, every component flipped.
+  //
+  // The racquet's own weight cancels under either convention, since the calibration was measured
+  // in the same one as the sensor it came from, so an empty plate reads ~0 both ways and no static
+  // check catches this. What does not cancel is the external load: writing R for MuJoCo's reading
+  // and G for the gravity term, training's observation is gain*R - G ~ +R_ball while mc_rtc's
+  // wrenchWithoutGravity is -R + G ~ -R_ball. The ball pushes the observation the wrong way.
+  //
+  // The simulation response above must stay on the mc_rtc-convention quantity -- it reconstructs
+  // the raw reading via wrench() and the calibration offset, both of which are in that convention
+  // -- so the flip belongs here, after it, and applies on hardware too: the convention being
+  // matched is the policy's, not the robot's.
+  wrench = -wrench;
+
   Eigen::Vector6d eeCurrentWrench = Eigen::Vector6d::Zero();
   eeCurrentWrench.head<3>() = wrench.force();
   eeCurrentWrench.tail<3>() = wrench.couple();
-
-  eeCurrentWrench *= -1;
 
   jointPos[0] = q - q_zero;
   jointVel[0] = q_dot;
@@ -311,6 +356,20 @@ void RLKinovaBallBalancingMcController::addLog()
   logger().addLogEntry("RLKinovaBallBalancingMcController_useQP", [this]() { return useQP; });
   logger().addLogEntry("RLKinovaBallBalancingMcController_isTorqueControl", [this]() { return isTorqueControl_; });
 
+  // Raw sensor reading alongside the compensated one in eeWrench_0: without it there is no way to
+  // tell from a log whether the simulation compensation fired, or what it did.
+  logger().addLogEntry("RLKinovaBallBalancingMcController_eeWrench_raw",
+                       [this]() -> Eigen::Vector6d
+                       {
+                         const auto & fs = realRobot(robots()[0].name()).forceSensor("EEForceSensor");
+                         Eigen::Vector6d w = Eigen::Vector6d::Zero();
+                         w.head<3>() = fs.wrench().force();
+                         w.tail<3>() = fs.wrench().couple();
+                         return w;
+                       });
+  logger().addLogEntry("RLKinovaBallBalancingMcController_simFtCompensation",
+                       [this]() { return simDetected_ == 1; });
+
   // Log observation
   for(int i = 0; i < HISTORY_SIZE; ++i)
   {
@@ -367,6 +426,12 @@ void RLKinovaBallBalancingMcController::addGui()
                         },
                         0.0, 2.0),
                     mc_rtc::gui::Label("Current kp", kp_), mc_rtc::gui::Label("Current kd", kd_));
+
+  gui()->addElement({"RLKinovaBallBalancingMcController", "Ball"},
+                    mc_rtc::gui::Button("Respawn ball on plate", [this]() { spawnBall(); }),
+                    mc_rtc::gui::Checkbox(
+                        "Respawn on RL state entry", [this]() { return spawnBallOnRLState; },
+                        [this]() { spawnBallOnRLState = !spawnBallOnRLState; }));
 
   gui()->addElement({"ControlMode"},
                     mc_rtc::gui::Button("Switch Control Mode",
@@ -441,6 +506,146 @@ bool RLKinovaBallBalancingMcController::manageModeSwitching()
   {
     return mc_control::fsm::Controller::run();
   }
+}
+
+void RLKinovaBallBalancingMcController::configureBallSpawn()
+{
+  if(!config_.has("ball_spawn"))
+  {
+    return;
+  }
+  auto c = config_("ball_spawn");
+  // In-place overloads: every key is optional and leaves the member at its default when absent.
+  c("enabled", spawnBallOnRLState);
+  c("object", ballObjectName_);
+  c("ball_radius", ballRadius_);
+  c("clearance", ballSpawnClearance_);
+  c("head_centre", ballHeadCentre_);
+  c("head_semi_axes", ballHeadSemiAxes_);
+}
+
+bool RLKinovaBallBalancingMcController::simulationFtCompensationActive()
+{
+  if(!simFtCompensationEnabled_) { return false; }
+
+  // mc_mujoco registers <robot>::SetPosW and <robot>::SetPDGains for every simulated robot in
+  // MjSimImpl::makeDatastoreCalls, unconditionally. Neither exists on the real robot, and unlike
+  // the <object>::SetPosW call spawnBall() keys off, these do not depend on anything being declared
+  // in mc_mujoco.yaml - so this asks about the interface, not about the scene.
+  //
+  // A negative answer is deliberately never cached. This is first reached from the constructor, via
+  // initializeRLPolicy(), and mc_mujoco only calls makeDatastoreCalls() *after* MCGlobalController
+  // is built (mj_sim.cpp: 767 constructs, 771 registers, 791 init()). Latching "not simulation"
+  // there would silently disable the compensation for the entire run - which is precisely the
+  // failure this whole block exists to fix, so it must not be reintroduced by the detection itself.
+  if(simDetected_ != 1 && datastore().has(robot().name() + "::SetPDGains"))
+  {
+    simDetected_ = 1;
+    mc_rtc::log::info("[RLKinovaBallBalancingMcController] Simulated F/T sensor: applying the trained sensor "
+                      "response (force gain {}{})",
+                      simFtForceGain_, simFtRemoveCalibOffset_ ? ", calibration offset removed" : "");
+  }
+  return simDetected_ == 1;
+}
+
+sva::ForceVecd RLKinovaBallBalancingMcController::applySimulationFtResponse(const mc_rbdyn::ForceSensor & fs,
+                                                                           const sva::ForceVecd & calibrated)
+{
+  if(!simulationFtCompensationActive()) { return calibrated; }
+
+  // The policy reads what a *Bota* would report, because that is what it was trained on:
+  // ball_balancing_mdp.py's ee_ft_wrench term runs MuJoCo's exact wrench through
+  // apply_ft_sensor_response before compensating gravity. MuJoCo's own sensor is ideal, so in
+  // simulation that model has to be added back here or the observation is not the one the policy
+  // learned. On hardware it must NOT be: the sensor already behaves this way physically, and
+  // applying it twice would be the same error with the opposite sign.
+  //
+  // Two corrections, and both have to happen on the raw reading, before gravity compensation -
+  // that is where they happen on hardware, and the compensation is a subtraction, so correcting
+  // the wrong side of it does not commute. Working backwards from what mc_rtc hands us:
+  //
+  //   calibrated = raw - wfToSensor            (ForceSensor::wrenchWithoutGravity)
+  //   wfToSensor = offset + gravity            (ForceSensorCalibData::wfToSensor)
+  //   wanted     = gain * raw - gravity
+  //              = calibrated + offset - (1 - gain) * raw
+  //
+  // 1. The offset. It is a *measured* sensor bias, and MuJoCo's sensor has none for it to cancel,
+  //    so subtracting it injects a constant error instead of removing one - here it is nearly 3 N,
+  //    against a 0.64 N ball. The training term omits it for exactly this reason. Adding it back
+  //    leaves gravity as the only thing compensated, which is what the policy saw.
+  // 2. The force gain. The real sensor reads ~3.7 % low, and the calibration file was measured on
+  //    hardware, so it holds 0.9633 * true_mass. Subtracting that measured gravity from an
+  //    unscaled MuJoCo force over-subtracts by 3.7 % of the payload - about 0.11 N standing, plus
+  //    3.7 % of the ball's own weight. The couple channel keeps unit gain: the residuals against
+  //    the rigid model show no measurable error there, and the training model scales force only.
+  // 3. The sensor frame. MuJoCo reports at the *model* sensor site, while mc_rtc's calibration
+  //    resolves gravity in the *actual* sensor frame -- the two differ by the misalignment the
+  //    calibration carries as X_f_ds (about 1 deg here). On hardware there is no such split: the
+  //    Bota reports in its own physical frame, which is the actual one. The training term rotates
+  //    MuJoCo's reading by the same X_f_ds for this reason, so the raw contribution below is
+  //    rotated to match; left unrotated it leaves ~0.06 N on a 3 N reading, ~9 % of the ball.
+  //
+  // Writing R for MuJoCo's reading, A for that rotation, K for `calibrated` and W = fs.wrench():
+  //
+  //   wanted = gain * (A R) - gravity  =  K + offset - W + gain * (A W)
+  //
+  // which is what this returns (unit gain on the couple). With A = I it collapses to
+  // K + offset - (1 - gain) * W, the form this had before the rotation was accounted for.
+  sva::ForceVecd wrench = calibrated;
+  if(simFtRemoveCalibOffset_) { wrench = wrench + fs.offset(); }
+  const sva::ForceVecd & raw = fs.wrench();
+  const Eigen::Matrix3d & R_f_ds = fs.calib().X_f_ds.rotation();
+  return sva::ForceVecd(wrench.couple() - raw.couple() + R_f_ds * raw.couple(),
+                        wrench.force() - raw.force() + simFtForceGain_ * (R_f_ds * raw.force()));
+}
+
+void RLKinovaBallBalancingMcController::spawnBall()
+{
+  // mc_mujoco registers <object>::SetPosW for every entry of the `objects` map in
+  // ~/.config/mc_rtc/mc_mujoco/mc_mujoco.yaml (mj_sim.cpp: makeDatastoreCalls). The call is absent
+  // on the real robot, and in simulation when the ball is simply not declared - neither is an
+  // error here, so warn once and carry on rather than throwing from an FSM state entry.
+  const auto setPosW = ballObjectName_ + "::SetPosW";
+  if(!datastore().has(setPosW))
+  {
+    if(!ballSpawnUnavailableWarned_)
+    {
+      mc_rtc::log::warning("[RLKinovaBallBalancingMcController] No {} datastore call: not respawning the ball. Declare "
+                           "the object in ~/.config/mc_rtc/mc_mujoco/mc_mujoco.yaml to enable it.",
+                           setPosW);
+      ballSpawnUnavailableWarned_ = true;
+    }
+    return;
+  }
+
+  // Where the ball goes: the highest point of the plate head, plus one ball radius and a small gap.
+  //
+  // The head is modelled as the ellipsoid {c + S u, ||u|| = 1} with c = ballHeadCentre_ and
+  // S = diag(ballHeadSemiAxes_) in the control frame. The point of that ellipsoid furthest along a
+  // direction d is c + S (S d)/||S d||. Computing it from the plate's current orientation, instead
+  // of applying a fixed offset, keeps the drop point on top of the head whatever the tilt is - the
+  // policy is free to be off the nominal posture when the state is entered.
+  //
+  // Poses come from the real robot: that is what MuJoCo actually simulates, and the ball is being
+  // placed in MuJoCo's world.
+  const auto & real_robot = realRobot(robots()[0].name());
+  const sva::PTransformd & X_0_p = real_robot.bodyPosW(controlFrameName);
+  // sva stores rotations as world -> body, hence E_0_p for world quantities and its transpose to
+  // bring body quantities back to the world.
+  const Eigen::Matrix3d & E_0_p = X_0_p.rotation();
+  const Eigen::Vector3d up_p = E_0_p * Eigen::Vector3d::UnitZ();
+  const Eigen::Vector3d top_p =
+      ballHeadCentre_ + ballHeadSemiAxes_.cwiseProduct(ballHeadSemiAxes_.cwiseProduct(up_p).normalized());
+
+  Eigen::Vector3d ballPos = X_0_p.translation() + E_0_p.transpose() * top_p;
+  ballPos.z() += ballRadius_ + ballSpawnClearance_;
+
+  // Identity rotation: the ball is a sphere, and SetPosW zeroes its linear and angular velocities,
+  // so this is a clean respawn rather than a teleport of a moving body.
+  const sva::PTransformd X_0_ball(ballPos);
+  datastore().call<void, const sva::PTransformd &>(setPosW, X_0_ball);
+  mc_rtc::log::info("[RLKinovaBallBalancingMcController] Respawned '{}' at [{:.3f}, {:.3f}, {:.3f}]", ballObjectName_,
+                    ballPos.x(), ballPos.y(), ballPos.z());
 }
 
 void RLKinovaBallBalancingMcController::wrenchTaskUpdate()

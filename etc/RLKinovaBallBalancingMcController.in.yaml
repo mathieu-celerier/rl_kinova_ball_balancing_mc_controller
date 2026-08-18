@@ -8,12 +8,12 @@ StepByStep: true
 IdleKeepState: false
 # Where to look for state libraries
 StatesLibraries:
-- "@MC_STATES_DEFAULT_RUNTIME_INSTALL_PREFIX@"
-- "@MC_STATES_RUNTIME_INSTALL_PREFIX@"
+  - "@MC_STATES_DEFAULT_RUNTIME_INSTALL_PREFIX@"
+  - "@MC_STATES_RUNTIME_INSTALL_PREFIX@"
 # Where to look for state files
 StatesFiles:
-- "@MC_STATES_DEFAULT_RUNTIME_INSTALL_PREFIX@/data"
-- "@MC_STATES_RUNTIME_INSTALL_PREFIX@/data"
+  - "@MC_STATES_DEFAULT_RUNTIME_INSTALL_PREFIX@/data"
+  - "@MC_STATES_RUNTIME_INSTALL_PREFIX@/data"
 # If true, state factory will be more verbose
 VerboseStateFactory: false
 # Additional robots to load
@@ -23,50 +23,124 @@ robots:
 
 # Collision constraint
 collisions:
-- type: collision
-  useMinimal: true
+  - type: collision
+    useMinimal: true
 
 ObserverPipelines:
-- name: Pipeline
-  gui: true
-  log: true
-  observers:
-    - type: Encoder
-      velocity: encoderVelocities
-    - type: ExternalForcesObserver
-      # estimation_method: MomentumObserver    # MomentumObserver, ForceSensorBased
-      # torque_source_type: JointTorqueMeasurement
-      # residual_gain: 30.0
-      estimation_method: MomentumObserver # or ForceSensorBased
-      is_active: true                  # false = estimate and log only, no feedback to QP
-      use_forces_from_ft_sensors: false # include FT sensor wrenches in the estimate
-      # MomentumObserver-only keys:
-      residual_gain: 10.0              # observer gain K; higher = faster response, more noise
-      torque_source_type: CommandedTorque  # JointTorqueMeasurement preferred when available
-
+  - name: Pipeline
+    gui: true
+    log: true
+    observers:
+      - type: Encoder
+        velocity: encoderVelocities
+      - type: ExternalForcesObserver
+        # estimation_method: MomentumObserver    # MomentumObserver, ForceSensorBased
+        # torque_source_type: JointTorqueMeasurement
+        # residual_gain: 30.0
+        estimation_method: MomentumObserver # or ForceSensorBased
+        is_active: true # false = estimate and log only, no feedback to QP
+        use_forces_from_ft_sensors: false # include FT sensor wrenches in the estimate
+        # MomentumObserver-only keys:
+        residual_gain: 10.0 # observer gain K; higher = faster response, more noise
+        torque_source_type: CommandedTorque # JointTorqueMeasurement preferred when available
 
 # Implement some additional text states
 states: {}
 # Transitions map
 transitions:
-- [RLKinovaBallBalancingMcController_Initial, RLWithoutQP, RLKinovaBallBalancingMcController_RLWithoutQP, Strict]
-- [RLKinovaBallBalancingMcController_RLWithoutQP, OK, RLKinovaBallBalancingMcController_Initial, Strict]
-- [RLKinovaBallBalancingMcController_Initial, RL, RLKinovaBallBalancingMcController_RL, Strict]
-- [RLKinovaBallBalancingMcController_RL, OK, RLKinovaBallBalancingMcController_Initial, Strict]
-- [RLKinovaBallBalancingMcController_Initial, WrenchTask, RLKinovaBallBalancingMcController_WrenchTask, Strict]
-- [RLKinovaBallBalancingMcController_WrenchTask, OK, RLKinovaBallBalancingMcController_Initial, Strict]
-- [RLKinovaBallBalancingMcController_Initial, WrenchTaskNS, RLKinovaBallBalancingMcController_WrenchTaskNS, Strict]
-- [RLKinovaBallBalancingMcController_WrenchTaskNS, OK, RLKinovaBallBalancingMcController_Initial, Strict]
+  - [
+      RLKinovaBallBalancingMcController_Initial,
+      RLWithoutQP,
+      RLKinovaBallBalancingMcController_RLWithoutQP,
+      Strict,
+    ]
+  - [
+      RLKinovaBallBalancingMcController_RLWithoutQP,
+      OK,
+      RLKinovaBallBalancingMcController_Initial,
+      Strict,
+    ]
+  - [
+      RLKinovaBallBalancingMcController_Initial,
+      RL,
+      RLKinovaBallBalancingMcController_RL,
+      Strict,
+    ]
+  - [
+      RLKinovaBallBalancingMcController_RL,
+      OK,
+      RLKinovaBallBalancingMcController_Initial,
+      Strict,
+    ]
+  - [
+      RLKinovaBallBalancingMcController_Initial,
+      WrenchTask,
+      RLKinovaBallBalancingMcController_WrenchTask,
+      Strict,
+    ]
+  - [
+      RLKinovaBallBalancingMcController_WrenchTask,
+      OK,
+      RLKinovaBallBalancingMcController_Initial,
+      Strict,
+    ]
+  - [
+      RLKinovaBallBalancingMcController_Initial,
+      WrenchTaskNS,
+      RLKinovaBallBalancingMcController_WrenchTaskNS,
+      Strict,
+    ]
+  - [
+      RLKinovaBallBalancingMcController_WrenchTaskNS,
+      OK,
+      RLKinovaBallBalancingMcController_Initial,
+      Strict,
+    ]
 # Initial state
 init: RLKinovaBallBalancingMcController_Initial
 # init: RLKinovaBallBalancingMcController_RLWithoutQP
 
-policy_path: ["noCalibButWork.onnx"]  # Path to the RL policy file(s)
+policy_path: ["@RL_POLICY_INSTALL_DIR@/new_racquet_calib.onnx"] # Path to the RL policy file(s)
 default_policy_index: 0 # Index of the default policy to use
+
+# Body the WrenchTask acts on and the end-effector observations are read from. Must be the frame the
+# policy was trained in: the run this policy comes from lists `body_names: (racquet_frame,)` on every
+# ee_* observation term. mc_kinova's KinovaBotaPlate provides it, 0.125 m out along the blade from
+# the "plate" link and rotated 90 deg about X, so reading "plate" instead silently feeds the policy a
+# different point and a different orientation.
+control_frame: racquet_frame
+
+# Simulation-only F/T sensor compensation. Applied ONLY when the controller detects it is driving a
+# simulated robot (mc_mujoco's <robot>::SetPDGains datastore call); on hardware the whole block is
+# inert, whatever is set here. It exists because MuJoCo's force sensor is ideal and the policy was
+# trained on a model of the real Bota - see applySimulationFtResponse() for the derivation.
+#
+#   remove_calibration_offset: the calib file's offset is a *measured* sensor bias (~3 N here).
+#     mc_rtc's wrenchWithoutGravity subtracts it; MuJoCo has no bias for it to cancel, so in
+#     simulation it injects that error rather than removing it. Training omits it for this reason.
+#   force_gain: the real sensor reads ~3.7 % low, and the calibration was measured on hardware, so
+#     it holds 0.9633 * true_mass. Must match the `force_gain` of the training run's ee_ft_wrench
+#     term - 0.9633 for the runs this controller currently ships policies for.
+sim_ft_sensor:
+  enabled: true
+  force_gain: 0.9633
+  remove_calibration_offset: true
 policies:
-    # index 0 :
+  # index 0 :
   - is_torque_control: true
-    use_QP: true
+    # false routes the RL states through byPassQPControl(), which writes
+    # kp*(q_rl - q) - kd*q_dot straight into mbc().jointTorque -- exactly the law the policy was
+    # trained against (a MuJoCo position actuator with the same kp/kd, nothing else in the loop).
+    # true goes through the QP instead, which also balances but measurably worse: the QP adds a
+    # CompliantPostureTask and the ExternalForcesObserver feedback (is_active: true), neither of
+    # which the policy ever saw, so the torque reaching the robot is not quite the one its actions
+    # were learned for. Bypassing is the closer match, hence the default.
+    #
+    # Not to be confused with the failure that was originally blamed on the QP. Before the F/T
+    # sign fix (see the wrench handling in initializeRLObservation), the racquet collapsed with
+    # the QP on and appeared to recover when it was bypassed; that was the inverted ball force
+    # driving the policy, not the QP, and both paths balance now that the sign is right.
+    use_QP: false
     policy_step_size: 0.01 # Policy step size in seconds
     physics_step_size: 0.001 # Physics step size in seconds
     pd_gains_ratio: 1.0

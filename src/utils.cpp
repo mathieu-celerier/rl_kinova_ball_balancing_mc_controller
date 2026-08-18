@@ -14,7 +14,14 @@ void utils::start_rl_state(mc_control::fsm::Controller & ctl_, std::string state
   syncTime_ = ctl.policyStepSize;
 
   ctl.initializeRLObservation();
-    
+
+  // Entering an RL state means starting a balancing attempt: put a ball back on the plate, wherever
+  // the previous one ended up. No-op outside mc_mujoco.
+  if(ctl.spawnBallOnRLState)
+  {
+    ctl.spawnBall();
+  }
+
   if(!ctl.rlPolicy || !ctl.rlPolicy->isLoaded())
   {
     mc_rtc::log::error("RL policy not loaded in {} state", state_name);
