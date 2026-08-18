@@ -24,6 +24,18 @@ add_subdirectory(src)
 #   add_subdirectory(tests)
 # endif()
 
+# RLPolicyInterface::loadPolicy passes policy_path straight to std::filesystem / Ort::Session with
+# no directory joining, so a bare filename resolves against the *current working directory* — i.e.
+# it only works when mc_rtc is launched from inside policy/. Install the policies and bake their
+# absolute location into the generated config instead.
+set(RL_POLICY_INSTALL_DIR
+    "${CMAKE_INSTALL_PREFIX}/share/RLKinovaBallBalancingMcController/policy")
+install(
+  DIRECTORY policy/
+  DESTINATION share/RLKinovaBallBalancingMcController/policy
+  FILES_MATCHING
+  PATTERN "*.onnx")
+
 configure_file(etc/RLKinovaBallBalancingMcController.in.yaml
                "${CMAKE_CURRENT_BINARY_DIR}/etc/RLKinovaBallBalancingMcController.yaml")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/etc/RLKinovaBallBalancingMcController.yaml"
