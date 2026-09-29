@@ -335,6 +335,34 @@ bool RLKinovaBallBalancingMcController::byPassQPControl()
   return true;
 }
 
+void RLKinovaBallBalancingMcController::toggleQPControl()
+{
+  // Which path the policy takes is a property of the state, not a flag that can be flipped under
+  // it: the policy only reaches the QP through torqueJointTask, and only the RL state adds that
+  // task and feeds it q_rl. Flipping useQP inside RLWithoutQP therefore handed the arm to a QP
+  // with nothing tracking the policy -- the actions kept being computed and went nowhere, and the
+  // arm drifted away for as long as it was left alone (the racquet passed the vertical, pointing
+  // at the ground, ~30 s after the toggle). So switch states instead; the two RL states differ in
+  // exactly this, and each sets useQP itself on entry.
+  //
+  // Entering an RL state respawns the ball unless that is unchecked in the GUI, so a switch
+  // restarts the balancing attempt rather than continuing the current one.
+  const std::string & current = executor_.state();
+  if(current == "RLKinovaBallBalancingMcController_RLWithoutQP")
+  {
+    resume("RLKinovaBallBalancingMcController_RL");
+    return;
+  }
+  if(current == "RLKinovaBallBalancingMcController_RL")
+  {
+    resume("RLKinovaBallBalancingMcController_RLWithoutQP");
+    return;
+  }
+  // Everywhere else the flag is still meaningful: Initial and the WrenchTask states drive the QP
+  // through tasks of their own, so they keep working whichever way it is set.
+  useQP = !useQP;
+}
+
 void RLKinovaBallBalancingMcController::addLog()
 {
   // Robot State variables
@@ -442,7 +470,7 @@ void RLKinovaBallBalancingMcController::addGui()
                                         }),
                     mc_rtc::gui::Label("Current Control Mode",
                                        [this]() { return isTorqueControl_ ? "Torque Control" : "Position Control"; }),
-                    mc_rtc::gui::Button("Toggle QP Control", [this]() { useQP = !useQP; }),
+                    mc_rtc::gui::Button("Toggle QP Control", [this]() { toggleQPControl(); }),
                     mc_rtc::gui::Label("QP Control", [this]() { return useQP ? "Enforced" : "Bypassed"; }));
 }
 

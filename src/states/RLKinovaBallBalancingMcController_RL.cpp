@@ -8,6 +8,7 @@ void RLKinovaBallBalancingMcController_RL::start(mc_control::fsm::Controller & c
 {
   auto & ctl = static_cast<RLKinovaBallBalancingMcController &>(ctl_);
   ctl.utilsClass.start_rl_state(ctl, "RL_State");
+  ctl.useQP = true; // Force the QP to be used in this state, the mirror of RLWithoutQP
   ctl.solver().addTask(ctl.torqueJointTask);
 }
 

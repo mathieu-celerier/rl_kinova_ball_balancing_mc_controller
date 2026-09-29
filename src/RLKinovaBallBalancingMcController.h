@@ -26,6 +26,9 @@ struct RLKinovaBallBalancingMcController_DLLAPI RLKinovaBallBalancingMcControlle
   // Drop the simulated ball back onto the plate. Called on entry of every RL state (utils.cpp) and
   // from the GUI. Silently does nothing outside mc_mujoco - see the definition.
   void spawnBall();
+  // What the GUI's "Toggle QP Control" button does: switch between the two RL states rather than
+  // flip useQP under the running state. See the definition for why.
+  void toggleQPControl();
   // Whether entering an RL state respawns the ball. Toggled from the GUI.
   bool spawnBallOnRLState = true;
 
