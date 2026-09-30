@@ -4,3 +4,6 @@
 # shadows the nix-built packages in the devel shell
 /.superbuild/
 /build/
+
+# MuJoCo writes this into whatever directory the simulator is launched from.
+MUJOCO_LOG.TXT
